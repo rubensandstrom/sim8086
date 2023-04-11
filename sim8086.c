@@ -2,10 +2,8 @@
  * Notes and thoughts.
  ******************************************************************************/
 /*
- * We want a second jumptable, the first one checks for order and size i.e. d 
- * and w if they exist. The second one checks for operation to be performed.
- *
- * es = 0b00 cs = 0b01 ss= 0b10 ds =0b11
+ * Mabye make rm_im and reg_rm into same function with check for im or rm
+ * es = 0b00 cs = 0b01 ss = 0b10 ds = 0b11
 */
 /******************************************************************************
  * Library includes
@@ -38,6 +36,7 @@
 
 #define OP                  0b00111000
 #define REG                 0b00111000
+
 /******************************************************************************
  * GLOBAL VARIABLES 
  ******************************************************************************/
@@ -49,7 +48,7 @@ typedef union {
   uint16_t wide[8];
   uint8_t byte[8]; // index needs to be formated with offset
 } Register; 
-const uint8_t offset[8] = {0, 2, 4, 6, 1, 3, 5, 7};
+const uint8_t offset[8] = {0, 2, 4, 6, 1, 3, 5, 7}; // offset for memory.byte
 
 Register reg;
 uint16_t seg[4] = {0x0, 0x4000, 0x8000, 0xC000};
@@ -62,6 +61,7 @@ uint8_t c;
 /******************************************************************************
  * EFFECTIVE ADDRESS CALCULATION
  ******************************************************************************/
+
 uint16_t bx_si() { return (reg.wide[3] + reg.wide[6]); }
 uint16_t bx_di() { return (reg.wide[3] + reg.wide[7]); }
 uint16_t bp_si() { return (reg.wide[5] + reg.wide[6]); }
@@ -76,6 +76,7 @@ uint16_t (*effective_address_calculation[8])() = {bx_si, bx_di, bp_si, bp_di, si
 /******************************************************************************
  *  Op-functions, target for jumptabele_byte/wide
  ******************************************************************************/
+
 void nop_byte(uint8_t *x, uint8_t *y) {} // this is just for now
 void mov_byte(uint8_t *x, uint8_t *y) { *x = *y; }
 void add_byte(uint8_t *x, uint8_t *y) { *x += *y; }
@@ -111,10 +112,11 @@ void (*arithmetic_byte[8])(uint8_t *, uint8_t *) = {
 void (*arithmetic_wide[8])(uint16_t *, uint16_t *) = {
   add_wide, or_wide, adc_wide, sbb_wide, and_wide, sub_wide, xor_wide, cmp_wide, 
 };
-/******************************************************************************
- *
- ******************************************************************************/
 
+/******************************************************************************
+ * 
+ ******************************************************************************/
+// Moved arithmetic operations out into their own table, table below should be reduced.
 void (*jumptable_byte[64])(uint8_t * , uint8_t *) = { 
   add_byte, add_byte, nop_byte, nop_byte, adc_byte, adc_byte, nop_byte, nop_byte,
   nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte,
@@ -243,9 +245,8 @@ void wide_rm_im() {
   uint16_t address_index;
   uint16_t displacement;
 
-  // Memory instructions not implemented
   switch (mod_index) {
-    case 0b00: //TODO
+    case 0b00:
       if (rm_index == 0b110) { // DIRECT ADDRESS
         address_index = memory[(seg[1] << 4) + ip++];
         address_index |= memory[(seg[1] << 4) + ip++] << 8;
@@ -254,14 +255,14 @@ void wide_rm_im() {
       }
       rm = (uint16_t *)&memory[(seg[3] << 4) + address_index]; // should mabye check for missalignment and oob.
       break;
-    case 0b01: //TODO
+    case 0b01:
       displacement = memory[(seg[1] << 4) + ip++];
 
       address_index = effective_address_calculation[rm_index]();
       address_index += displacement;
       rm = (uint16_t *)&memory[(seg[3] << 4) + address_index]; 
       break;
-    case 0b10: //TODO
+    case 0b10:
       displacement = memory[(seg[1] << 4) + ip++];
       displacement |= memory[(seg[1] << 4) + ip++] << 8;
 
@@ -269,7 +270,7 @@ void wide_rm_im() {
       address_index += displacement;
       rm = (uint16_t *)&memory[(seg[3] << 4) + address_index]; 
       break;
-    case 0b11: //DONE
+    case 0b11:
       rm = &reg.wide[rm_index];
       break;
   }
@@ -280,7 +281,7 @@ void wide_rm_im() {
   } else im |= memory[(seg[1] << 4) + ip++] << 8; 
 
   (*arithmetic_wide[(tmp & OP) >> 3])(rm, &im);
-} 
+} // NEEDS TESTING 
 
 void byte_acc_im() {
   uint8_t tmp = c;
