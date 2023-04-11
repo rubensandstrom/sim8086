@@ -5,7 +5,7 @@
  * We want a second jumptable, the first one checks for order and size i.e. d 
  * and w if they exist. The second one checks for operation to be performed.
  *
- * es = 0b00 ca = 0b01 ss= 0b10 ds =0b11
+ * es = 0b00 cs = 0b01 ss= 0b10 ds =0b11
 */
 /******************************************************************************
  * Library includes
@@ -42,7 +42,7 @@
  * GLOBAL VARIABLES 
  ******************************************************************************/
 // MAIN MEMORY
-uint8_t *memory;
+uint8_t memory[1048576]; // 1Mb of ram memory
 
 // REGISTERS
 typedef union {
@@ -52,7 +52,7 @@ typedef union {
 const uint8_t offset[8] = {0, 2, 4, 6, 1, 3, 5, 7};
 
 Register reg;
-uint16_t seg[4];
+uint16_t seg[4] = {0x0, 0x4000, 0x8000, 0xC000};
 uint16_t flags;
 uint16_t ip;
 
@@ -60,9 +60,23 @@ FILE *fp;
 uint8_t c;
 
 /******************************************************************************
+ * EFFECTIVE ADDRESS CALCULATION
+ ******************************************************************************/
+uint16_t bx_si() { return (reg.wide[3] + reg.wide[6]); }
+uint16_t bx_di() { return (reg.wide[3] + reg.wide[7]); }
+uint16_t bp_si() { return (reg.wide[5] + reg.wide[6]); }
+uint16_t bp_di() { return (reg.wide[5] + reg.wide[7]); }
+uint16_t si() { return reg.wide[6]; }
+uint16_t di() { return reg.wide[7]; }
+uint16_t bp() { return reg.wide[5]; }
+uint16_t bx() { return reg.wide[3]; }
+
+uint16_t (*effective_address_calculation[8])() = {bx_si, bx_di, bp_si, bp_di, si, di, bp, bx};
+
+/******************************************************************************
  *  Op-functions, target for jumptabele_byte/wide
  ******************************************************************************/
-void nop_byte(uint8_t *, uint8_t *) {} // this is just for now
+void nop_byte(uint8_t *x, uint8_t *y) {} // this is just for now
 void mov_byte(uint8_t *x, uint8_t *y) { *x = *y; }
 void add_byte(uint8_t *x, uint8_t *y) { *x += *y; }
 void or_byte(uint8_t *x, uint8_t *y) {}
@@ -76,7 +90,7 @@ void sub_byte(uint8_t *x, uint8_t *y) {}
 void xor_byte(uint8_t *x, uint8_t *y) {}
 void cmp_byte(uint8_t *x, uint8_t *y) {}
 
-void nop_wide(uint16_t *, uint16_t *) {} // this is just for now
+void nop_wide(uint16_t *x, uint16_t *y) {} // this is just for now
 void mov_wide(uint16_t *x, uint16_t *y) { *x = *y; }
 void add_wide(uint16_t *x, uint16_t *y) { *x += *y; }
 void or_wide(uint16_t *x, uint16_t *y) {}
@@ -97,6 +111,9 @@ void (*arithmetic_byte[8])(uint8_t *, uint8_t *) = {
 void (*arithmetic_wide[8])(uint16_t *, uint16_t *) = {
   add_wide, or_wide, adc_wide, sbb_wide, and_wide, sub_wide, xor_wide, cmp_wide, 
 };
+/******************************************************************************
+ *
+ ******************************************************************************/
 
 void (*jumptable_byte[64])(uint8_t * , uint8_t *) = { 
   add_byte, add_byte, nop_byte, nop_byte, adc_byte, adc_byte, nop_byte, nop_byte,
@@ -217,35 +234,53 @@ void byte_rm_im() {
 }
 
 void wide_rm_im() {
-  uint8_t tmp = c;
-  c = getc(fp);
+  uint8_t tmp = memory[(seg[1] << 4) + ip++];
+  c = memory[(seg[1] << 4) + ip++];
   uint8_t mod_index = (c & 0b11000000) >> 6;
   uint8_t rm_index = (c & 0b00000111);
   uint16_t *rm;
-  uint16_t *im;
+  uint16_t im;
+  uint16_t address_index;
+  uint16_t displacement;
 
   // Memory instructions not implemented
   switch (mod_index) {
-    case 0b00:
-      //TODO
+    case 0b00: //TODO
+      if (rm_index == 0b110) { // DIRECT ADDRESS
+        address_index = memory[(seg[1] << 4) + ip++];
+        address_index |= memory[(seg[1] << 4) + ip++] << 8;
+      } else {
+        address_index = effective_address_calculation[rm_index]();
+      }
+      rm = (uint16_t *)&memory[(seg[3] << 4) + address_index]; // should mabye check for missalignment and oob.
       break;
-    case 0b01:
-      //TODO
+    case 0b01: //TODO
+      displacement = memory[(seg[1] << 4) + ip++];
+
+      address_index = effective_address_calculation[rm_index]();
+      address_index += displacement;
+      rm = (uint16_t *)&memory[(seg[3] << 4) + address_index]; 
       break;
-    case 0b10:
-      //TODO
+    case 0b10: //TODO
+      displacement = memory[(seg[1] << 4) + ip++];
+      displacement |= memory[(seg[1] << 4) + ip++] << 8;
+
+      address_index = effective_address_calculation[rm_index]();
+      address_index += displacement;
+      rm = (uint16_t *)&memory[(seg[3] << 4) + address_index]; 
       break;
-    case 0b11:
+    case 0b11: //DONE
       rm = &reg.wide[rm_index];
       break;
   }
-  *im = getc(fp);
-  if (tmp & SIGN) { 
-    if (*im & BYTE_HIGH) *im |= 0xff00;
-  } else *im |= getc(fp) << 8; 
+  im = memory[(seg[1] << 4) + ip++];
 
-  (*arithmetic_wide[(tmp & OP) >> 3])(rm, im);
-}
+  if (tmp & SIGN) { 
+    if (im & BYTE_HIGH) im |= 0xff00;
+  } else im |= memory[(seg[1] << 4) + ip++] << 8; 
+
+  (*arithmetic_wide[(tmp & OP) >> 3])(rm, &im);
+} 
 
 void byte_acc_im() {
   uint8_t tmp = c;
@@ -367,12 +402,26 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  fp = fopen(argv[1], "r");
-  void *memory = malloc(32);//1048576
-  if (memory == NULL) {
-    printf("Could not allocate 1Mb of memory.");
-    return 0;
+  fp = fopen(argv[1], "rb");
+  if (fp == NULL) {
+    printf("Couldn't open %s.", argv[1]);
+    exit(1);
   }
+  fseek(fp, 0L, SEEK_END); 
+  long size = ftell(fp);  
+  if (size >= 65536) {
+    printf("File must be less than 64 Kb in size.\n");
+    printf("Current file size is: %i\n", (int)ftell(fp));
+    exit(1);
+  }
+  if (seg[1] + size >= 1<<20) {
+    printf("Not enough space in code segment.");
+    printf("CS: %i", seg[1]);
+    exit(1);
+  }
+  rewind(fp);
+  fread(memory + (seg[1] << 4), size, 1, fp);
+  fclose(fp); // close file before ending program.
 
   printf("al: %#04x\n", reg.byte[0]);
   printf("cl: %#04x\n", reg.byte[2]);
@@ -397,9 +446,8 @@ int main(int argc, char **argv) {
   printf("ds: %#06x\n", seg[3]);
   printf("\n");
 
-  while ((c = getc(fp)) != 0xF4) {
-    ip++;
-    (*jumptable_mod[c])();
+  while (memory[(seg[1] << 4) + ip] != 0xF4) {
+    (*jumptable_mod[memory[(seg[1] << 4) + ip]])();
   }
 
   printf("al: %#04x\n", reg.byte[0]);
@@ -430,7 +478,7 @@ int main(int argc, char **argv) {
     printf("%d", (flags & (1 << i)) >> i );
   printf("\n");
 
-  free(memory); // free memory before ending program.
-  fclose(fp); // close file before ending program.
+  printf("\n%x\n", memory[(0xC000 << 4)]);
+
   return 0;
 }

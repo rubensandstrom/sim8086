@@ -1,6 +1,5 @@
 bits 16
 
-add sp, 4
-push cs
+add [BX], word 4
 hlt
 
