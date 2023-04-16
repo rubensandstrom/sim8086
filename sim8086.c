@@ -1,8 +1,15 @@
 /******************************************************************************
+ * THIS IS A SIMULATOR OF THE INTEL 8086 PROCESSOR 
+ ******************************************************************************/
+/******************************************************************************
  * Notes and thoughts.
  ******************************************************************************/
 /*
- * Mabye make rm_im and reg_rm into same function with check for im or rm
+ * Mabye make rm_im and reg_rm into same function with check for im or rm, this 
+ * can be done by cheking the highest bit in the first byte and if it is 0 set
+ * im to the adress of reg[tmp & REG] and then chek the d bit to know what order
+ * to set the argument in the call to arithmetic. (will look into later)
+ *
  * es = 0b00 cs = 0b01 ss = 0b10 ds = 0b11
 */
 /******************************************************************************
@@ -11,31 +18,50 @@
 
 #include <stdint.h> // for uint8_t and uint16_t
 #include <stdio.h> // for open and close
-#include <stdlib.h> // For malloc and free
 
 /******************************************************************************
  * Bit patterns
  ******************************************************************************/
 
 #define CARRY_FLAG          1
-#define PARITY_FLAG         1<<2
-#define AUXILIARY_FLAG      1<<4
-#define ZERO_FLAG           1<<6
-#define SIGN_FLAG           1<<7
-#define TRAP_FLAG           1<<8
-#define INTERUPT_FLAG       1<<9
-#define DIRECTIONAL_FLAG    1<<10
-#define OVERFLOW_FLAG       1<<11
+#define PARITY_FLAG         (1<<2)
+#define AUXILIARY_FLAG      (1<<4)
+#define ZERO_FLAG           (1<<6)
+#define SIGN_FLAG           (1<<7)
+#define TRAP_FLAG           (1<<8)
+#define INTERUPT_FLAG       (1<<9)
+#define DIRECTIONAL_FLAG    (1<<10)
+#define OVERFLOW_FLAG       (1<<11)
 
-#define WIDE                1
-#define DEST                1<<1
-#define SIGN                1<<1
-
-#define BYTE_HIGH           1<<7
-#define WIDE_HIGH           1<<15
+#define W_BIT                1
+#define D_BIT                (1<<1)
+#define S_BIT                (1<<1)
 
 #define OP                  0b00111000
 #define REG                 0b00111000
+
+#define AL                  0
+#define CL                  2
+#define DL                  4
+#define BL                  6
+#define AH                  1
+#define CH                  3
+#define DH                  5
+#define BH                  7
+
+#define AX                  0
+#define CX                  1
+#define DX                  2
+#define BX                  3
+#define SP                  4
+#define BP                  5
+#define SI                  6
+#define DI                  7
+
+#define ES                  0
+#define CS                  1
+#define SS                  2
+#define DS                  3
 
 /******************************************************************************
  * GLOBAL VARIABLES 
@@ -55,8 +81,7 @@ uint16_t seg[4] = {0x0, 0x4000, 0x8000, 0xC000};
 uint16_t flags;
 uint16_t ip;
 
-FILE *fp;
-uint8_t c;
+uint8_t c; // current byte
 
 /******************************************************************************
  * EFFECTIVE ADDRESS CALCULATION
@@ -74,36 +99,148 @@ uint16_t bx() { return reg.wide[3]; }
 uint16_t (*effective_address_calculation[8])() = {bx_si, bx_di, bp_si, bp_di, si, di, bp, bx};
 
 /******************************************************************************
- *  Op-functions, target for jumptabele_byte/wide
+ *  ARITHMETIC
+ *  but also MOV reg_rm and MOV rm_im as part of. 
+ *  byte_reg_rm, byte_rm_im, wide_reg_rm, wide_rm_im
+ *  the other MOV instructions are separate because they use other operands than arithmetic.
  ******************************************************************************/
 
-void nop_byte(uint8_t *x, uint8_t *y) {} // this is just for now
-void mov_byte(uint8_t *x, uint8_t *y) { *x = *y; }
-void add_byte(uint8_t *x, uint8_t *y) { *x += *y; }
-void or_byte(uint8_t *x, uint8_t *y) {}
-void adc_byte(uint8_t *x, uint8_t *y) { 
-  *x += *y; 
-  if (flags & CARRY_FLAG) *x += 1; 
+void set_flags_byte(uint8_t before, uint8_t after, uint8_t source) {
+  if (after < before) { flags |= CARRY_FLAG; } else { flags &= ~CARRY_FLAG; }
+  uint8_t ones = 0;
+  for (int i = 7; i >= 0; i--) {
+    if (after & (1 << i)) { ones++; }
+  }
+  if ( ones % 2 == 0) { flags |= PARITY_FLAG; } else { flags &= ~PARITY_FLAG; }
+  if (before & 0b1111 + source & 0b1111 > 0b1111) { flags |= AUXILIARY_FLAG; } else { flags &= ~AUXILIARY_FLAG; } 
+  if (after == 0) { flags |= ZERO_FLAG; } else { flags &= ~ZERO_FLAG; }
+  if (after & (1<<7)) { flags |= SIGN_FLAG; } else { flags &= ~SIGN_FLAG; }
+  if ((before & (1<<7) && source & (1<<7) && !(after & (1<<7))) || 
+      (!(before & (1<<7)) && !(source & (1<<7)) && after & (1<<7))) {
+    flags |= OVERFLOW_FLAG;
+  } else {
+    flags &= ~OVERFLOW_FLAG;
+  }
 }
-void sbb_byte(uint8_t *x, uint8_t *y) {}
-void and_byte(uint8_t *x, uint8_t *y) {}
-void sub_byte(uint8_t *x, uint8_t *y) {}
-void xor_byte(uint8_t *x, uint8_t *y) {}
-void cmp_byte(uint8_t *x, uint8_t *y) {}
 
-void nop_wide(uint16_t *x, uint16_t *y) {} // this is just for now
-void mov_wide(uint16_t *x, uint16_t *y) { *x = *y; }
-void add_wide(uint16_t *x, uint16_t *y) { *x += *y; }
-void or_wide(uint16_t *x, uint16_t *y) {}
-void adc_wide(uint16_t *x, uint16_t *y) { 
+void set_flags_wide(uint16_t before, uint16_t after, uint16_t source) {
+  if (after < before) { flags |= CARRY_FLAG; } else { flags &= ~CARRY_FLAG; }
+  uint8_t ones = 0;
+  for (int i = 15; i >= 0; i--) {
+    if (after & (1 << i)) { ones++; }
+  }
+  if ( ones % 2 == 0) { flags |= PARITY_FLAG; } else { flags &= ~PARITY_FLAG; }
+  if (before & 0b1111 + source & 0b1111 > 0b1111) { flags |= AUXILIARY_FLAG; } else { flags &= ~AUXILIARY_FLAG; } 
+  if (after == 0) { flags |= ZERO_FLAG; } else { flags &= ~ZERO_FLAG; }
+  if (after & (1 << 15)) { flags |= SIGN_FLAG; } else { flags &= ~SIGN_FLAG; }
+  if ((before & (1 << 15) && source & (1 << 15) && !(after & (1 << 15))) || 
+      (!(before & (1 << 15)) && !(source & (1 << 15)) && after & (1 << 15))) {
+    flags |= OVERFLOW_FLAG;
+  } else {
+    flags &= ~OVERFLOW_FLAG;
+  }
+}
+
+void add_byte(uint8_t *x, uint8_t *y) { 
+  uint8_t before = *x;
+  *x += *y; 
+  set_flags_byte(before, *x, *y);
+}
+
+void or_byte(uint8_t *x, uint8_t *y) {
+  uint8_t before = *x;
+  *x |= *y;
+  set_flags_byte(before, *x, *y);
+}
+
+void adc_byte(uint8_t *x, uint8_t *y) { 
+  uint8_t before = *x;
   *x += *y; 
   if (flags & CARRY_FLAG) *x += 1; 
+  set_flags_byte(before, *x, *y);
 }
-void sbb_wide(uint16_t *x, uint16_t *y) {}
-void and_wide(uint16_t *x, uint16_t *y) {}
-void sub_wide(uint16_t *x, uint16_t *y) {}
-void xor_wide(uint16_t *x, uint16_t *y) {}
-void cmp_wide(uint16_t *x, uint16_t *y) {}
+
+void sbb_byte(uint8_t *x, uint8_t *y) {
+  uint8_t before = *x;
+  *x -= *y;
+  if (flags & CARRY_FLAG) *x -= 1;
+  set_flags_byte(before, *x, *y);
+}
+
+void and_byte(uint8_t *x, uint8_t *y) {
+  uint8_t before = *x;
+  *x &= *y;
+  set_flags_byte(before, *x, *y);
+}
+
+void sub_byte(uint8_t *x, uint8_t *y) {
+  uint8_t before = *x;
+  *x -= *y;
+  set_flags_byte(before, *x, *y);
+}
+
+void xor_byte(uint8_t *x, uint8_t *y) {
+  uint8_t before = *x;
+  *x ^= *y;
+  set_flags_byte(before, *x, *y);
+}
+
+void cmp_byte(uint8_t *x, uint8_t *y) {
+  uint8_t before = *x;
+  uint8_t after = *x - *y;
+  set_flags_byte(before, after, *y);
+}
+
+
+void add_wide(uint16_t *x, uint16_t *y) { 
+  uint16_t before = *x;
+  *x += *y; 
+  set_flags_wide(before, *x, *y);
+}
+
+void or_wide(uint16_t *x, uint16_t *y) {
+  uint16_t before = *x;
+  *x |= *y;
+  set_flags_wide(before, *x, *y);
+}
+
+void adc_wide(uint16_t *x, uint16_t *y) { 
+  uint16_t before = *x;
+  *x += *y; 
+  if (flags & CARRY_FLAG) *x += 1; 
+  set_flags_wide(before, *x, *y);
+}
+
+void sbb_wide(uint16_t *x, uint16_t *y) {
+  uint16_t before = *x;
+  *x -= *y;
+  if (flags & CARRY_FLAG) *x -= 1;
+  set_flags_wide(before, *x, *y);
+}
+
+void and_wide(uint16_t *x, uint16_t *y) {
+  uint16_t before = *x;
+  *x &= *y;
+  set_flags_wide(before, *x, *y);
+}
+
+void sub_wide(uint16_t *x, uint16_t *y) {
+  uint16_t before = *x;
+  *x -= *y;
+  set_flags_wide(before, *x, *y);
+}
+
+void xor_wide(uint16_t *x, uint16_t *y) {
+  uint16_t before = *x;
+  *x ^= *y;
+  set_flags_wide(before, *x, *y);
+}
+
+void cmp_wide(uint16_t *x, uint16_t *y) {
+  uint16_t before = *x;
+  uint16_t after = *x - *y;
+  set_flags_wide(before, after, *y);
+}
 
 void (*arithmetic_byte[8])(uint8_t *, uint8_t *) = {
   add_byte, or_byte, adc_byte, sbb_byte, and_byte, sub_byte, xor_byte, cmp_byte, 
@@ -113,281 +250,419 @@ void (*arithmetic_wide[8])(uint16_t *, uint16_t *) = {
   add_wide, or_wide, adc_wide, sbb_wide, and_wide, sub_wide, xor_wide, cmp_wide, 
 };
 
-/******************************************************************************
- * 
- ******************************************************************************/
-// Moved arithmetic operations out into their own table, table below should be reduced.
-void (*jumptable_byte[64])(uint8_t * , uint8_t *) = { 
-  add_byte, add_byte, nop_byte, nop_byte, adc_byte, adc_byte, nop_byte, nop_byte,
-  nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte,
-  nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte,
-  nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte,
-  add_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte,
-  nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte,
-  nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte,
-  nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte, nop_byte,
-};
-
-void (*jumptable_wide[64])(uint16_t *, uint16_t *) = { 
-  add_wide, add_wide, nop_wide, nop_wide, adc_wide, adc_wide, nop_wide, nop_wide,
-  nop_wide, nop_wide, nop_wide, nop_wide, nop_wide, nop_wide, nop_wide, nop_wide,
-  nop_wide, nop_wide, nop_wide, nop_wide, nop_wide, nop_wide, nop_wide, nop_wide,
-  nop_wide, nop_wide, nop_wide, nop_wide, nop_wide, nop_wide, nop_wide, nop_wide,
-  add_wide, nop_wide, mov_wide, mov_wide, nop_wide, nop_wide, nop_wide, nop_wide,
-  nop_wide, nop_wide, nop_wide, nop_wide, nop_wide, nop_wide, nop_wide, nop_wide,
-  nop_wide, nop_wide, nop_wide, nop_wide, nop_wide, nop_wide, nop_wide, nop_wide,
-  nop_wide, nop_wide, nop_wide, nop_wide, nop_wide, nop_wide, nop_wide, nop_wide,
-};
-
-/******************************************************************************
- * Instructions
- ******************************************************************************/
-/*''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''*
- * ARITHMETIC 
- *''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''*/
-
 void byte_reg_rm() {
   uint8_t tmp = c;
-  c = getc(fp);
-  uint8_t mod_index = (c & 0b11000000) >> 6;
-  uint8_t r_index = (c & 0b00111000) >> 3;
-  uint8_t rm_index = (c & 0b00000111);
-  uint8_t *r;
-  uint8_t *rm;
-  // Memory instructions not implemented
-  switch (mod_index) {
-    case 0b00:
-      //TODO
-      break;
-    case 0b01:
-      //TODO
-      break;
-    case 0b10:
-      //TODO
-      break;
-    case 0b11:
-      rm = &reg.byte[offset[rm_index]]; 
-      r = &reg.byte[offset[r_index]];
-      break;
-  }
-  if (tmp & DEST){
-    (*arithmetic_byte[(tmp & OP) >> 3])(r, rm);
-  } else {
-    (*arithmetic_byte[(tmp & OP) >> 3])(rm, r);
-  }
-}
-
-void wide_reg_rm() {
-  uint8_t tmp = c;
-  c = getc(fp);
-  uint8_t mod_index = (c & 0b11000000) >> 6;
-  uint8_t r_index = (c & 0b00111000) >> 3;
-  uint8_t rm_index = (c & 0b00000111);
-  uint16_t *r;
-  uint16_t *rm;
-  // Memory instructions not implemented
-  switch (mod_index) {
-    case 0b00:
-      //TODO
-      break;
-    case 0b01:
-      //TODO
-      break;
-    case 0b10:
-      //TODO
-      break;
-    case 0b11:
-      rm = &reg.wide[rm_index]; 
-      r = &reg.wide[r_index];
-      break;
-  }
-  if (tmp & DEST){
-    (*arithmetic_wide[(tmp & OP) >> 3])(r, rm);
-  } else {
-    (*arithmetic_wide[(tmp & OP) >> 2])(rm, r);
-  }
-}
-
-void byte_rm_im() {
-  uint8_t tmp = c;
-  c = getc(fp);
-  uint8_t mod_index = (c & 0b11000000) >> 6;
-  uint8_t rm_index = (c & 0b00000111);
-  uint8_t *rm;
-  uint8_t *im;
-
-  // Memory instructions not implemented
-  switch (mod_index) {
-    case 0b00:
-      //TODO
-      break;
-    case 0b01:
-      //TODO
-      break;
-    case 0b10:
-      //TODO
-      break;
-    case 0b11:
-      rm = &reg.byte[offset[rm_index]];
-      *im = getc(fp);
-      break;
-  }
-  (*arithmetic_byte[(tmp & OP) >> 3])(rm, im);
-}
-
-void wide_rm_im() {
-  uint8_t tmp = memory[(seg[1] << 4) + ip++];
   c = memory[(seg[1] << 4) + ip++];
   uint8_t mod_index = (c & 0b11000000) >> 6;
   uint8_t rm_index = (c & 0b00000111);
-  uint16_t *rm;
-  uint16_t im;
-  uint16_t address_index;
+  uint8_t *rm;
+  uint8_t *r;
   uint16_t displacement;
 
   switch (mod_index) {
     case 0b00:
       if (rm_index == 0b110) { // DIRECT ADDRESS
-        address_index = memory[(seg[1] << 4) + ip++];
-        address_index |= memory[(seg[1] << 4) + ip++] << 8;
+        displacement = memory[(seg[CS] << 4) + ip++];
+        displacement |= memory[(seg[CS] << 4) + ip++] << 8;
       } else {
-        address_index = effective_address_calculation[rm_index]();
+        displacement = effective_address_calculation[rm_index]();
       }
-      rm = (uint16_t *)&memory[(seg[3] << 4) + address_index]; // should mabye check for missalignment and oob.
+      rm = &memory[(seg[DS] << 4) + displacement]; // should mabye check for missalignment and oob.
       break;
     case 0b01:
-      displacement = memory[(seg[1] << 4) + ip++];
-
-      address_index = effective_address_calculation[rm_index]();
-      address_index += displacement;
-      rm = (uint16_t *)&memory[(seg[3] << 4) + address_index]; 
+      displacement = memory[(seg[CS] << 4) + ip++];
+      displacement += effective_address_calculation[rm_index]();
+      rm = &memory[(seg[DS] << 4) + displacement]; 
       break;
     case 0b10:
-      displacement = memory[(seg[1] << 4) + ip++];
-      displacement |= memory[(seg[1] << 4) + ip++] << 8;
+      displacement = memory[(seg[CS] << 4) + ip++];
+      displacement |= memory[(seg[CS] << 4) + ip++] << 8;
+      displacement += effective_address_calculation[rm_index]();
+      rm = &memory[(seg[DS] << 4) + displacement]; 
+      break;
+    case 0b11:
+      rm = &reg.byte[offset[rm_index]];
+      break;
+  }
+  r = &reg.byte[offset[tmp & REG]];
 
-      address_index = effective_address_calculation[rm_index]();
-      address_index += displacement;
-      rm = (uint16_t *)&memory[(seg[3] << 4) + address_index]; 
+  // If is MOV instruction
+  if (tmp == 0b10001010) {
+    *r = *rm;
+    return;
+  } else if (tmp == 0b10001000) {
+    *rm = *r;
+    return;
+  }
+
+  // Else is Arithmetic instruction
+  if (tmp & 0b10) {
+    (*arithmetic_byte[(tmp & OP) >> 3])(r, rm);
+  } else {
+
+    (*arithmetic_byte[(tmp & OP) >> 3])(rm, r);
+  }
+} // NEEDS TESTING
+
+void wide_reg_rm() {
+  uint8_t tmp = c;
+  c = memory[(seg[1] << 4) + ip++];
+  uint8_t mod_index = (c & 0b11000000) >> 6;
+  uint8_t rm_index = (c & 0b00000111);
+  uint16_t *rm;
+  uint16_t *r;
+  uint16_t displacement;
+
+  switch (mod_index) {
+    case 0b00:
+      if (rm_index == 0b110) { // DIRECT ADDRESS
+        displacement = memory[(seg[CS] << 4) + ip++];
+        displacement |= memory[(seg[CS] << 4) + ip++] << 8;
+      } else {
+        displacement = effective_address_calculation[rm_index]();
+      }
+      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; // should mabye check for missalignment and oob.
+      break;
+    case 0b01:
+      displacement = memory[(seg[CS] << 4) + ip++];
+      displacement += effective_address_calculation[rm_index]();
+      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; 
+      break;
+    case 0b10:
+      displacement = memory[(seg[CS] << 4) + ip++];
+      displacement |= memory[(seg[CS] << 4) + ip++] << 8;
+      displacement += effective_address_calculation[rm_index]();
+      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; 
       break;
     case 0b11:
       rm = &reg.wide[rm_index];
       break;
   }
-  im = memory[(seg[1] << 4) + ip++];
+  r = &reg.wide[tmp & REG];
 
-  if (tmp & SIGN) { 
-    if (im & BYTE_HIGH) im |= 0xff00;
-  } else im |= memory[(seg[1] << 4) + ip++] << 8; 
+  // If is MOV instruction
+  if (tmp == 0b10001011) {
+    *r = *rm;
+    return;
+  } else if (tmp == 0b10001001) {
+    *rm = *r;
+    return;
+  }
 
-  (*arithmetic_wide[(tmp & OP) >> 3])(rm, &im);
+  // Else is arithmetic
+  if (tmp & 0b10) {
+    (*arithmetic_wide[(tmp & OP) >> 3])(r, rm);
+  } else {
+
+    (*arithmetic_wide[(tmp & OP) >> 3])(rm, r);
+  }
+} // NEEDS TESTING
+
+void byte_rm_im() {
+  uint8_t tmp = c;
+  c = memory[(seg[1] << 4) + ip++];
+  uint8_t mod_index = (c & 0b11000000) >> 6;
+  uint8_t rm_index = (c & 0b00000111);
+  uint8_t *rm;
+  uint8_t im;
+  uint16_t displacement;
+
+  switch (mod_index) {
+    case 0b00:
+      if (rm_index == 0b110) { // DIRECT ADDRESS
+        displacement = memory[(seg[CS] << 4) + ip++];
+        displacement |= memory[(seg[CS] << 4) + ip++] << 8;
+      } else {
+        displacement = effective_address_calculation[rm_index]();
+      }
+      rm = &memory[(seg[DS] << 4) + displacement]; // should mabye check for missalignment and oob.
+      break;
+    case 0b01:
+      displacement = memory[(seg[CS] << 4) + ip++];
+      displacement += effective_address_calculation[rm_index]();
+      rm = &memory[(seg[DS] << 4) + displacement]; 
+      break;
+    case 0b10:
+      displacement = memory[(seg[CS] << 4) + ip++];
+      displacement |= memory[(seg[CS] << 4) + ip++] << 8;
+      displacement += effective_address_calculation[rm_index]();
+      rm = &memory[(seg[DS] << 4) + displacement]; 
+      break;
+    case 0b11:
+      rm = &reg.byte[offset[rm_index]];
+      break;
+  }
+  im = memory[(seg[CS] << 4) + ip++];
+
+  // If is MOV instruction
+  if (tmp == 0b11000110) {
+    *rm = im;
+
+  // Else is arithemetic
+  } else {
+    (*arithmetic_byte[(c & OP) >> 3])(rm, &im);
+  }
+} // NEEDS TESTING
+
+void wide_rm_im() {
+  uint8_t tmp = c;
+  c = memory[(seg[1] << 4) + ip++];
+  uint8_t mod_index = (c & 0b11000000) >> 6;
+  uint8_t rm_index = (c & 0b00000111);
+  uint16_t *rm;
+  uint16_t im;
+  uint16_t displacement;
+
+  switch (mod_index) {
+    case 0b00:
+      if (rm_index == 0b110) { // DIRECT ADDRESS
+        displacement = memory[(seg[CS] << 4) + ip++];
+        displacement |= memory[(seg[CS] << 4) + ip++] << 8;
+      } else {
+        displacement = effective_address_calculation[rm_index]();
+      }
+      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; // should mabye check for missalignment and oob.
+      break;
+    case 0b01:
+      displacement = memory[(seg[CS] << 4) + ip++];
+      displacement += effective_address_calculation[rm_index]();
+      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; 
+      break;
+    case 0b10:
+      displacement = memory[(seg[CS] << 4) + ip++];
+      displacement |= memory[(seg[CS] << 4) + ip++] << 8;
+      displacement += effective_address_calculation[rm_index]();
+      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; 
+      break;
+    case 0b11:
+      rm = &reg.wide[rm_index];
+      break;
+  }
+  im = memory[(seg[CS] << 4) + ip++];
+
+  if (tmp & S_BIT) { 
+    if (im & (1<<7)) im |= 0xff00;
+  } else im |= memory[(seg[CS] << 4) + ip++] << 8; 
+
+  if (tmp == 0b11000111) {
+    *rm = im;
+
+  // Else is arithemetic
+  } else {
+    (*arithmetic_wide[(c & OP) >> 3])(rm, &im);
+  }
 } // NEEDS TESTING 
+
 
 void byte_acc_im() {
   uint8_t tmp = c;
-  uint8_t *acc = &reg.byte[0];
-  uint8_t *im;
-  *im = getc(fp);
-  (*arithmetic_byte[(tmp & OP) >> 3])(acc, im);
-}
+  uint8_t *acc = &reg.byte[AL];
+  uint8_t im;
+  im = memory[(seg[CS] << 4) + ip++];
+  (*arithmetic_byte[(tmp & OP) >> 3])(acc, &im);
+} // NEEDS TESTING
 
 void wide_acc_im() {
   uint8_t tmp = c;
-  uint16_t *acc = &reg.wide[0];
-  uint16_t *im;
-  *im = getc(fp);
-  *im |= getc(fp)<<8;
-  (*arithmetic_wide[(tmp & OP) >> 3])(acc, im);
-}
+  uint16_t *acc = &reg.wide[AX];
+  uint16_t im;
+  im = memory[(seg[CS] << 4) + ip++];
+  im |= memory[(seg[CS] << 4) + ip++] << 8;
+  (*arithmetic_wide[(tmp & OP) >> 3])(acc, &im);
+} // NEEDS TESTING
 
 /*''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''*
  * END OF ARITHMETIC 
  *''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''*/
 
-void wide_seg_rm() {
-  uint8_t tmp = c;
-  c = getc(fp);
-  uint8_t mod_index = (c & 0b11000000) >> 6;
-  uint8_t sr_index = (c & 0b00011000) >> 3;
-  uint8_t rm_index = (c & 0b00000111);
-  uint16_t *sr;
-  uint16_t *rm;
+/******************************************************************************
+ * MOV except for reg_rm and rm_im
+ ******************************************************************************/
+void mov_reg_im() {
+  if (c & 0b1000) {
+    uint16_t im = memory[(seg[CS] << 4) + ip++];
+    im |= memory[(seg[CS] << 4) + ip++] << 8;
+    reg.wide[c & 0b111] = im;
+  } else {
+    uint8_t im = memory[(seg[CS] << 4) + ip++];
+    reg.byte[offset[c & 0b111]] = im;
+  }
+} // NEEDS TESTING
 
-  // Memory instructions not implemented
+void mov_acc_mem() {
+  uint16_t address = memory[(seg[CS] << 4) + ip++];
+  address |= memory[(seg[CS] << 4) + ip++];
+  if (c & W_BIT) {
+    reg.wide[AX] = *((uint16_t *)&memory[(seg[DS] << 4) + address]); // UNSURE 
+  } else {
+    reg.byte[AL] = memory[(seg[DS] << 4) + address];
+  } 
+} // NEEDS TESTING
+
+void mov_seg_rm() {
+  c = memory[(seg[1] << 4) + ip++];
+  uint8_t mod_index = (c & 0b11000000) >> 6;
+  uint8_t rm_index = (c & 0b00000111);
+  uint16_t *rm;
+  uint16_t displacement;
+
   switch (mod_index) {
     case 0b00:
-      //TODO
+      if (rm_index == 0b110) { // DIRECT ADDRESS
+        displacement = memory[(seg[CS] << 4) + ip++];
+        displacement |= memory[(seg[CS] << 4) + ip++] << 8;
+      } else {
+        displacement = effective_address_calculation[rm_index]();
+      }
+      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; // should mabye check for missalignment and oob.
       break;
     case 0b01:
-      //TODO
+      displacement = memory[(seg[CS] << 4) + ip++];
+      displacement += effective_address_calculation[rm_index]();
+      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; 
       break;
     case 0b10:
-      //TODO11
+      displacement = memory[(seg[CS] << 4) + ip++];
+      displacement |= memory[(seg[CS] << 4) + ip++] << 8;
+      displacement += effective_address_calculation[rm_index]();
+      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; 
       break;
     case 0b11:
-      sr = &seg[sr_index];
       rm = &reg.wide[rm_index];
       break;
   }
-  if (tmp & DEST) {
-    (*jumptable_wide[tmp>>2])(sr, rm);
+  if (c & D_BIT) {
+    seg[c & 0b00011000] = *rm;
   } else {
-    (*jumptable_wide[tmp>>2])(rm, sr);
+    *rm = seg[c & 0b00011000];
   }
+} // NEEDS TESTING
+
+
+/*''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''*
+ * END OF MOV
+ *''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''*/
+
+
+/******************************************************************************
+ * JUMPS
+ ******************************************************************************/
+
+void jo() {
 }
 
-void mov_byte_reg_im() {
-  reg.byte[offset[c & 0b00000111]] = getc(fp);
+void jno() {
 }
 
-void mov_wide_reg_im() {
-  reg.wide[c & 0b00000111] = getc(fp);
-  reg.wide[c & 0b00000111] |= getc(fp) << 8;
+void jb() {
 }
+
+void jnb() {
+}
+
+void je() {
+}
+
+void jne() {
+}
+
+void jbe() {
+}
+
+void jnbe() {
+}
+
+void js() {
+}
+
+void jns() {
+}
+
+void jp() {
+}
+
+void jnp() {
+}
+
+void jl() {
+}
+
+void jnl() {
+}
+
+void jle() {
+}
+
+void jnle() {
+}
+
+/*''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''*
+ * END OF JUMPS
+ *''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''*/
+
+
+/******************************************************************************
+ * PUSH AND POP
+ ******************************************************************************/
+
+void push_seg() {
+  memory[reg.wide[4]] = seg[(c & REG) >> 3];
+  reg.wide[4]++;
+  ip++;
+}
+
+void pop_seg() {
+  seg[(c & REG) >> 3] = memory[reg.wide[4]];
+  reg.wide[4]--;
+  ip++;
+}
+
+/*''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''*
+ * END OF PUSH AND POP
+ *''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''*/
 
 
 void hlt() {
   exit(0);
 }
-void push_seg() {
-  memory[reg.wide[4]] = seg[(c & REG) >> 3];
-  reg.wide[4]++;
 
-}
 
 /******************************************************************************
  * Jumptable
  ******************************************************************************/
-void nop() {}
+void fail() {
+  printf("failed at %x", memory[(seg[1] << 4) + ip]);
+  exit(1);
+}
 
 void (*jumptable_mod[256])() = { 
   /* ARITHMETIC */
-  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, byte_acc_im, wide_acc_im, push_seg, NULL,
-  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, byte_acc_im, wide_acc_im, push_seg, NULL, 
-  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, byte_acc_im, wide_acc_im, push_seg, NULL,  
-  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, byte_acc_im, wide_acc_im, push_seg, NULL,   
-  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, byte_acc_im, wide_acc_im, NULL, NULL, 
-  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, byte_acc_im, wide_acc_im, NULL, NULL,
-  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, byte_acc_im, wide_acc_im, NULL, NULL, 
-  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, byte_acc_im, wide_acc_im, NULL, NULL,
+  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, byte_acc_im, wide_acc_im, push_seg, pop_seg,
+  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, byte_acc_im, wide_acc_im, push_seg, pop_seg, 
+  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, byte_acc_im, wide_acc_im, push_seg, pop_seg,  
+  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, byte_acc_im, wide_acc_im, push_seg, pop_seg,   
+  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, byte_acc_im, wide_acc_im, seg_override, decimal_adjust_for_add, 
+  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, byte_acc_im, wide_acc_im, seg_override, decimal_adjust_for_subrtact,
+  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, byte_acc_im, wide_acc_im, seg_override, ascii_adjust_for_add, 
+  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, byte_acc_im, wide_acc_im, seg_override, ascii_adjust_for_subtract,
 
-  nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, 
-  nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, 
-  nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, 
-  nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, 
+  fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
+  fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
+  fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
+  fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
 
-  byte_rm_im, wide_rm_im, byte_rm_im, wide_rm_im, nop, nop, nop, nop, 
-  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, wide_seg_rm, nop, wide_seg_rm, nop, 
-  nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, 
-  nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, 
+  byte_rm_im, wide_rm_im, byte_rm_im, wide_rm_im, fail, fail, fail, fail, 
+  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, wide_seg_rm, fail, wide_seg_rm, fail, 
+  fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
+  fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
  
   mov_byte_reg_im, mov_byte_reg_im, mov_byte_reg_im, mov_byte_reg_im, mov_byte_reg_im, mov_byte_reg_im, mov_byte_reg_im, mov_byte_reg_im,
   mov_wide_reg_im, mov_wide_reg_im, mov_wide_reg_im, mov_wide_reg_im, mov_wide_reg_im, mov_wide_reg_im, mov_wide_reg_im, mov_wide_reg_im,   
 
-  nop, nop, nop, nop, nop, nop, byte_rm_im, wide_rm_im, nop, nop, nop, nop, nop, nop, nop, nop, 
-  nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, 
-  nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, 
-  nop, nop, nop, nop, hlt, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, nop, 
+  fail, fail, fail, fail, fail, fail, byte_rm_im, wide_rm_im, fail, fail, fail, fail, fail, fail, fail, fail, 
+  fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
+  fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
+  fail, fail, fail, fail, hlt, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
 };
  // 176 - 183  or  0b10110xxx
  // 184 - 191  or  0b10111xxx
@@ -403,7 +678,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  fp = fopen(argv[1], "rb");
+  FILE *fp = fopen(argv[1], "rb");
   if (fp == NULL) {
     printf("Couldn't open %s.", argv[1]);
     exit(1);
@@ -415,13 +690,13 @@ int main(int argc, char **argv) {
     printf("Current file size is: %i\n", (int)ftell(fp));
     exit(1);
   }
-  if (seg[1] + size >= 1<<20) {
+  if (seg[CS] + size >= 1<<20) {
     printf("Not enough space in code segment.");
-    printf("CS: %i", seg[1]);
+    printf("CS: %i", seg[CS]);
     exit(1);
   }
   rewind(fp);
-  fread(memory + (seg[1] << 4), size, 1, fp);
+  fread(memory + (seg[CS] << 4), size, 1, fp);
   fclose(fp); // close file before ending program.
 
   printf("al: %#04x\n", reg.byte[0]);
@@ -447,8 +722,8 @@ int main(int argc, char **argv) {
   printf("ds: %#06x\n", seg[3]);
   printf("\n");
 
-  while (memory[(seg[1] << 4) + ip] != 0xF4) {
-    (*jumptable_mod[memory[(seg[1] << 4) + ip]])();
+  while ((c = memory[(seg[CS] << 4) + ip++]) != 0xF4) { // 0xF4 = hlt
+    (*jumptable_mod[c])();
   }
 
   printf("al: %#04x\n", reg.byte[0]);
@@ -478,8 +753,5 @@ int main(int argc, char **argv) {
   for (int i = 15; i >= 0; i--)
     printf("%d", (flags & (1 << i)) >> i );
   printf("\n");
-
-  printf("\n%x\n", memory[(0xC000 << 4)]);
-
   return 0;
 }
