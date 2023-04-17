@@ -18,6 +18,7 @@
 
 #include <stdint.h> // for uint8_t and uint16_t
 #include <stdio.h> // for open and close
+#include <stdlib.h> // for early exit
 
 /******************************************************************************
  * Bit patterns
@@ -37,8 +38,10 @@
 #define D_BIT                (1<<1)
 #define S_BIT                (1<<1)
 
+#define MOD                 0b11000000
 #define OP                  0b00111000
 #define REG                 0b00111000
+#define RM                  0b00000111
 
 #define AL                  0
 #define CL                  2
@@ -85,6 +88,7 @@ uint8_t c; // current byte
 
 /******************************************************************************
  * EFFECTIVE ADDRESS CALCULATION
+ * AND MOD RM
  ******************************************************************************/
 
 uint16_t bx_si() { return (reg.wide[3] + reg.wide[6]); }
@@ -98,11 +102,68 @@ uint16_t bx() { return reg.wide[3]; }
 
 uint16_t (*effective_address_calculation[8])() = {bx_si, bx_di, bp_si, bp_di, si, di, bp, bx};
 
+uint8_t *mod_byte(uint8_t mod_index, uint8_t rm_index) {
+  uint8_t *rm;
+  uint16_t displacement;
+  switch (mod_index) {
+    case 0b00:
+      if (rm_index == 0b110) { // DIRECT ADDRESS
+        displacement = memory[(seg[CS] << 4) + ip++];
+        displacement |= memory[(seg[CS] << 4) + ip++] << 8;
+      } else {
+        displacement = effective_address_calculation[rm_index]();
+      }
+      rm = &memory[(seg[DS] << 4) + displacement]; // should mabye check for missalignment and oob.
+      break;
+    case 0b01:
+      displacement = memory[(seg[CS] << 4) + ip++];
+      displacement += effective_address_calculation[rm_index]();
+      rm = &memory[(seg[DS] << 4) + displacement]; 
+      break;
+    case 0b10:
+      displacement = memory[(seg[CS] << 4) + ip++];
+      displacement |= memory[(seg[CS] << 4) + ip++] << 8;
+      displacement += effective_address_calculation[rm_index]();
+      rm = &memory[(seg[DS] << 4) + displacement]; 
+      break;
+    case 0b11:
+      rm = &reg.byte[offset[rm_index]];
+      break;
+  }
+  return rm;
+}
+uint16_t *mod_wide(uint8_t mod_index, uint8_t rm_index) {
+  uint16_t *rm;
+  uint16_t displacement;
+  switch (mod_index) {
+    case 0b00:
+      if (rm_index == 0b110) { // DIRECT ADDRESS
+        displacement = memory[(seg[CS] << 4) + ip++];
+        displacement |= memory[(seg[CS] << 4) + ip++] << 8;
+      } else {
+        displacement = effective_address_calculation[rm_index]();
+      }
+      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; // should mabye check for missalignment and oob.
+      break;
+    case 0b01:
+      displacement = memory[(seg[CS] << 4) + ip++];
+      displacement += effective_address_calculation[rm_index]();
+      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; 
+      break;
+    case 0b10:
+      displacement = memory[(seg[CS] << 4) + ip++];
+      displacement |= memory[(seg[CS] << 4) + ip++] << 8;
+      displacement += effective_address_calculation[rm_index]();
+      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; 
+      break;
+    case 0b11:
+      rm = &reg.wide[rm_index];
+      break;
+  }
+  return rm;
+}
 /******************************************************************************
  *  ARITHMETIC
- *  but also MOV reg_rm and MOV rm_im as part of. 
- *  byte_reg_rm, byte_rm_im, wide_reg_rm, wide_rm_im
- *  the other MOV instructions are separate because they use other operands than arithmetic.
  ******************************************************************************/
 
 void set_flags_byte(uint8_t before, uint8_t after, uint8_t source) {
@@ -255,51 +316,12 @@ void byte_reg_rm() {
   c = memory[(seg[1] << 4) + ip++];
   uint8_t mod_index = (c & 0b11000000) >> 6;
   uint8_t rm_index = (c & 0b00000111);
-  uint8_t *rm;
-  uint8_t *r;
-  uint16_t displacement;
+  uint8_t *rm = mod_byte(mod_index, rm_index);
+  uint8_t *r = &reg.byte[offset[(tmp & REG) >> 3]];
 
-  switch (mod_index) {
-    case 0b00:
-      if (rm_index == 0b110) { // DIRECT ADDRESS
-        displacement = memory[(seg[CS] << 4) + ip++];
-        displacement |= memory[(seg[CS] << 4) + ip++] << 8;
-      } else {
-        displacement = effective_address_calculation[rm_index]();
-      }
-      rm = &memory[(seg[DS] << 4) + displacement]; // should mabye check for missalignment and oob.
-      break;
-    case 0b01:
-      displacement = memory[(seg[CS] << 4) + ip++];
-      displacement += effective_address_calculation[rm_index]();
-      rm = &memory[(seg[DS] << 4) + displacement]; 
-      break;
-    case 0b10:
-      displacement = memory[(seg[CS] << 4) + ip++];
-      displacement |= memory[(seg[CS] << 4) + ip++] << 8;
-      displacement += effective_address_calculation[rm_index]();
-      rm = &memory[(seg[DS] << 4) + displacement]; 
-      break;
-    case 0b11:
-      rm = &reg.byte[offset[rm_index]];
-      break;
-  }
-  r = &reg.byte[offset[tmp & REG]];
-
-  // If is MOV instruction
-  if (tmp == 0b10001010) {
-    *r = *rm;
-    return;
-  } else if (tmp == 0b10001000) {
-    *rm = *r;
-    return;
-  }
-
-  // Else is Arithmetic instruction
   if (tmp & 0b10) {
     (*arithmetic_byte[(tmp & OP) >> 3])(r, rm);
   } else {
-
     (*arithmetic_byte[(tmp & OP) >> 3])(rm, r);
   }
 } // NEEDS TESTING
@@ -309,51 +331,12 @@ void wide_reg_rm() {
   c = memory[(seg[1] << 4) + ip++];
   uint8_t mod_index = (c & 0b11000000) >> 6;
   uint8_t rm_index = (c & 0b00000111);
-  uint16_t *rm;
-  uint16_t *r;
-  uint16_t displacement;
+  uint16_t *rm = mod_wide(mod_index, rm_index);
+  uint16_t *r = &reg.wide[(tmp & REG) >> 3];
 
-  switch (mod_index) {
-    case 0b00:
-      if (rm_index == 0b110) { // DIRECT ADDRESS
-        displacement = memory[(seg[CS] << 4) + ip++];
-        displacement |= memory[(seg[CS] << 4) + ip++] << 8;
-      } else {
-        displacement = effective_address_calculation[rm_index]();
-      }
-      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; // should mabye check for missalignment and oob.
-      break;
-    case 0b01:
-      displacement = memory[(seg[CS] << 4) + ip++];
-      displacement += effective_address_calculation[rm_index]();
-      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; 
-      break;
-    case 0b10:
-      displacement = memory[(seg[CS] << 4) + ip++];
-      displacement |= memory[(seg[CS] << 4) + ip++] << 8;
-      displacement += effective_address_calculation[rm_index]();
-      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; 
-      break;
-    case 0b11:
-      rm = &reg.wide[rm_index];
-      break;
-  }
-  r = &reg.wide[tmp & REG];
-
-  // If is MOV instruction
-  if (tmp == 0b10001011) {
-    *r = *rm;
-    return;
-  } else if (tmp == 0b10001001) {
-    *rm = *r;
-    return;
-  }
-
-  // Else is arithmetic
   if (tmp & 0b10) {
     (*arithmetic_wide[(tmp & OP) >> 3])(r, rm);
   } else {
-
     (*arithmetic_wide[(tmp & OP) >> 3])(rm, r);
   }
 } // NEEDS TESTING
@@ -363,45 +346,10 @@ void byte_rm_im() {
   c = memory[(seg[1] << 4) + ip++];
   uint8_t mod_index = (c & 0b11000000) >> 6;
   uint8_t rm_index = (c & 0b00000111);
-  uint8_t *rm;
-  uint8_t im;
-  uint16_t displacement;
+  uint8_t *rm = mod_byte(mod_index, rm_index);
+  uint8_t im = memory[(seg[CS] << 4) + ip++];
 
-  switch (mod_index) {
-    case 0b00:
-      if (rm_index == 0b110) { // DIRECT ADDRESS
-        displacement = memory[(seg[CS] << 4) + ip++];
-        displacement |= memory[(seg[CS] << 4) + ip++] << 8;
-      } else {
-        displacement = effective_address_calculation[rm_index]();
-      }
-      rm = &memory[(seg[DS] << 4) + displacement]; // should mabye check for missalignment and oob.
-      break;
-    case 0b01:
-      displacement = memory[(seg[CS] << 4) + ip++];
-      displacement += effective_address_calculation[rm_index]();
-      rm = &memory[(seg[DS] << 4) + displacement]; 
-      break;
-    case 0b10:
-      displacement = memory[(seg[CS] << 4) + ip++];
-      displacement |= memory[(seg[CS] << 4) + ip++] << 8;
-      displacement += effective_address_calculation[rm_index]();
-      rm = &memory[(seg[DS] << 4) + displacement]; 
-      break;
-    case 0b11:
-      rm = &reg.byte[offset[rm_index]];
-      break;
-  }
-  im = memory[(seg[CS] << 4) + ip++];
-
-  // If is MOV instruction
-  if (tmp == 0b11000110) {
-    *rm = im;
-
-  // Else is arithemetic
-  } else {
-    (*arithmetic_byte[(c & OP) >> 3])(rm, &im);
-  }
+  (*arithmetic_byte[(c & OP) >> 3])(rm, &im);
 } // NEEDS TESTING
 
 void wide_rm_im() {
@@ -409,65 +357,31 @@ void wide_rm_im() {
   c = memory[(seg[1] << 4) + ip++];
   uint8_t mod_index = (c & 0b11000000) >> 6;
   uint8_t rm_index = (c & 0b00000111);
-  uint16_t *rm;
-  uint16_t im;
-  uint16_t displacement;
-
-  switch (mod_index) {
-    case 0b00:
-      if (rm_index == 0b110) { // DIRECT ADDRESS
-        displacement = memory[(seg[CS] << 4) + ip++];
-        displacement |= memory[(seg[CS] << 4) + ip++] << 8;
-      } else {
-        displacement = effective_address_calculation[rm_index]();
-      }
-      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; // should mabye check for missalignment and oob.
-      break;
-    case 0b01:
-      displacement = memory[(seg[CS] << 4) + ip++];
-      displacement += effective_address_calculation[rm_index]();
-      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; 
-      break;
-    case 0b10:
-      displacement = memory[(seg[CS] << 4) + ip++];
-      displacement |= memory[(seg[CS] << 4) + ip++] << 8;
-      displacement += effective_address_calculation[rm_index]();
-      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; 
-      break;
-    case 0b11:
-      rm = &reg.wide[rm_index];
-      break;
-  }
-  im = memory[(seg[CS] << 4) + ip++];
+  uint16_t *rm = mod_wide(mod_index, rm_index);
+  uint16_t im = memory[(seg[CS] << 4) + ip++];
 
   if (tmp & S_BIT) { 
     if (im & (1<<7)) im |= 0xff00;
   } else im |= memory[(seg[CS] << 4) + ip++] << 8; 
 
-  if (tmp == 0b11000111) {
-    *rm = im;
-
-  // Else is arithemetic
-  } else {
-    (*arithmetic_wide[(c & OP) >> 3])(rm, &im);
-  }
+  (*arithmetic_wide[(c & OP) >> 3])(rm, &im);
 } // NEEDS TESTING 
 
 
 void byte_acc_im() {
   uint8_t tmp = c;
   uint8_t *acc = &reg.byte[AL];
-  uint8_t im;
-  im = memory[(seg[CS] << 4) + ip++];
+  uint8_t im = memory[(seg[CS] << 4) + ip++];
+
   (*arithmetic_byte[(tmp & OP) >> 3])(acc, &im);
 } // NEEDS TESTING
 
 void wide_acc_im() {
   uint8_t tmp = c;
   uint16_t *acc = &reg.wide[AX];
-  uint16_t im;
-  im = memory[(seg[CS] << 4) + ip++];
+  uint16_t im = memory[(seg[CS] << 4) + ip++];
   im |= memory[(seg[CS] << 4) + ip++] << 8;
+
   (*arithmetic_wide[(tmp & OP) >> 3])(acc, &im);
 } // NEEDS TESTING
 
@@ -476,8 +390,62 @@ void wide_acc_im() {
  *''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''*/
 
 /******************************************************************************
- * MOV except for reg_rm and rm_im
+ * MOV
  ******************************************************************************/
+
+void mov_byte_reg_rm() {
+  uint8_t tmp = c;
+  c = memory[(seg[1] << 4) + ip++];
+  uint8_t mod_index = (c & 0b11000000) >> 6;
+  uint8_t rm_index = (c & 0b00000111);
+  uint8_t *rm = mod_byte(mod_index, rm_index);
+  uint8_t *r = &reg.byte[offset[(tmp & REG) >> 3]];
+
+  if (tmp == D_BIT) {
+    *r = *rm;
+  } else {
+    *rm = *r;
+  }
+} // NEEDS TESTING
+
+void mov_wide_reg_rm() {
+  uint8_t tmp = c;
+  c = memory[(seg[1] << 4) + ip++];
+  uint8_t mod_index = (c & 0b11000000) >> 6;
+  uint8_t rm_index = (c & 0b00000111);
+  uint16_t *rm = mod_wide(mod_index, rm_index);
+  uint16_t *r = &reg.wide[(tmp & REG) >> 3];
+
+  if (tmp == D_BIT) {
+    *r = *rm;
+  } else {
+    *rm = *r;
+  }
+} // NEEDS TESTING
+
+void mov_byte_rm_im() {
+  uint8_t tmp = c;
+  c = memory[(seg[1] << 4) + ip++];
+  uint8_t mod_index = (c & 0b11000000) >> 6;
+  uint8_t rm_index = (c & 0b00000111);
+  uint8_t *rm = mod_byte(mod_index, rm_index);
+  uint8_t im = memory[(seg[CS] << 4) + ip++];
+
+  *rm = im;
+} // NEEDS TESTING
+
+void mov_wide_rm_im() {
+  uint8_t tmp = c;
+  c = memory[(seg[1] << 4) + ip++];
+  uint8_t mod_index = (c & 0b11000000) >> 6;
+  uint8_t rm_index = (c & 0b00000111);
+  uint16_t *rm = mod_wide(mod_index, rm_index);
+  uint16_t im = memory[(seg[CS] << 4) + ip++];
+  im |= memory[(seg[CS] << 4) + ip++];
+
+  *rm = im;
+} // NEEDS TESTING 
+
 void mov_reg_im() {
   if (c & 0b1000) {
     uint16_t im = memory[(seg[CS] << 4) + ip++];
@@ -492,45 +460,28 @@ void mov_reg_im() {
 void mov_acc_mem() {
   uint16_t address = memory[(seg[CS] << 4) + ip++];
   address |= memory[(seg[CS] << 4) + ip++];
-  if (c & W_BIT) {
-    reg.wide[AX] = *((uint16_t *)&memory[(seg[DS] << 4) + address]); // UNSURE 
+  if (c & D_BIT) {
+    if (c & W_BIT) {
+      reg.wide[AX] = *((uint16_t *)&memory[(seg[DS] << 4) + address]); // UNSURE 
+    } else {
+      reg.byte[AL] = memory[(seg[DS] << 4) + address];
+    } 
   } else {
-    reg.byte[AL] = memory[(seg[DS] << 4) + address];
-  } 
+    if (c & W_BIT) {
+      *((uint16_t *)&memory[(seg[DS] << 4) + address]) = reg.wide[AX]; // UNSURE 
+    } else {
+      memory[(seg[DS] << 4) + address] = reg.byte[AL];
+    } 
+  }
 } // NEEDS TESTING
 
 void mov_seg_rm() {
   c = memory[(seg[1] << 4) + ip++];
   uint8_t mod_index = (c & 0b11000000) >> 6;
   uint8_t rm_index = (c & 0b00000111);
-  uint16_t *rm;
+  uint16_t *rm = mod_wide(mod_index, rm_index);
   uint16_t displacement;
 
-  switch (mod_index) {
-    case 0b00:
-      if (rm_index == 0b110) { // DIRECT ADDRESS
-        displacement = memory[(seg[CS] << 4) + ip++];
-        displacement |= memory[(seg[CS] << 4) + ip++] << 8;
-      } else {
-        displacement = effective_address_calculation[rm_index]();
-      }
-      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; // should mabye check for missalignment and oob.
-      break;
-    case 0b01:
-      displacement = memory[(seg[CS] << 4) + ip++];
-      displacement += effective_address_calculation[rm_index]();
-      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; 
-      break;
-    case 0b10:
-      displacement = memory[(seg[CS] << 4) + ip++];
-      displacement |= memory[(seg[CS] << 4) + ip++] << 8;
-      displacement += effective_address_calculation[rm_index]();
-      rm = (uint16_t *)&memory[(seg[DS] << 4) + displacement]; 
-      break;
-    case 0b11:
-      rm = &reg.wide[rm_index];
-      break;
-  }
   if (c & D_BIT) {
     seg[c & 0b00011000] = *rm;
   } else {
@@ -549,73 +500,214 @@ void mov_seg_rm() {
  ******************************************************************************/
 
 void jo() {
-}
+  ip++;
+  if (flags & OVERFLOW_FLAG) {
+    ip += memory[(seg[CS] << 4) + ip] -1;
+  } else {
+    ip++;
+  }
+} // NEEDS TESTING
 
 void jno() {
-}
+  ip++;
+  if (!(flags & OVERFLOW_FLAG)) {
+    ip += memory[(seg[CS] << 4) + ip] -1;
+  } else {
+    ip++;
+  }
+} // NEEDS TESTING
 
 void jb() {
-}
+  ip++;
+  if (flags & CARRY_FLAG) {
+    ip += memory[(seg[CS] << 4) + ip] -1;
+  } else {
+    ip++;
+  }
+} // NEEDS TESTING
 
 void jnb() {
-}
+  ip++;
+  if (!(flags & CARRY_FLAG)) {
+    ip += memory[(seg[CS] << 4) + ip] -1;
+  } else {
+    ip++;
+  }
+} // NEEDS TESTING
 
 void je() {
-}
+  ip++;
+  if (flags & ZERO_FLAG) {
+    ip += memory[(seg[CS] << 4) + ip] -1;
+  } else {
+    ip++;
+  }
+} // NEEDS TESTING
 
 void jne() {
-}
+  ip++;
+  if (!(flags & ZERO_FLAG)) {
+    ip += memory[(seg[CS] << 4) + ip] -1;
+  } else {
+    ip++;
+  }
+} // NEEDS TESTING
 
 void jbe() {
-}
+  ip++;
+  if ((flags & CARRY_FLAG) || (flags & ZERO_FLAG)) {
+    ip += memory[(seg[CS] << 4) + ip] -1;
+  } else {
+    ip++;
+  }
+} // NEEDS TESTING
 
 void jnbe() {
-}
+  ip++;
+  if (!(flags & CARRY_FLAG) && !(flags & ZERO_FLAG)) {
+    ip += memory[(seg[CS] << 4) + ip] -1;
+  } else {
+    ip++;
+  }
+} // NEEDS TESTING
 
 void js() {
-}
+  ip++;
+  if (flags & SIGN_FLAG) {
+    ip += memory[(seg[CS] << 4) + ip] -1;
+  } else {
+    ip++;
+  }
+} // NEEDS TESTING
 
 void jns() {
-}
+  ip++;
+  if (!(flags & SIGN_FLAG)) {
+    ip += memory[(seg[CS] << 4) + ip] -1;
+  } else {
+    ip++;
+  }
+} // NEEDS TESTING
 
 void jp() {
-}
+  ip++;
+  if (flags & PARITY_FLAG) {
+    ip += memory[(seg[CS] << 4) + ip] -1;
+  } else {
+    ip++;
+  }
+} // NEEDS TESTING
 
 void jnp() {
-}
+  ip++;
+  if (!(flags & PARITY_FLAG)) {
+    ip += memory[(seg[CS] << 4) + ip] -1;
+  } else {
+    ip++;
+  }
+} // NEEDS TESTING
 
 void jl() {
-}
+  ip++;
+  if (!(flags & PARITY_FLAG)) {
+    ip += memory[(seg[CS] << 4) + ip] -1;
+  } else {
+    ip++;
+  }
+} // NEEDS TESTING
 
-void jnl() {
-}
+void jge() {
+  ip++;
+  if ((flags & OVERFLOW_FLAG) >> 4 == (flags & SIGN_FLAG)) {
+    ip += memory[(seg[CS] << 4) + ip] -1;
+  } else {
+    ip++;
+  }
+} // NEEDS TESTING
 
 void jle() {
-}
+  ip++;
+  if ((flags & ZERO_FLAG) || ((flags & OVERFLOW_FLAG) >> 4 != (flags & SIGN_FLAG))) {
+    ip += memory[(seg[CS] << 4) + ip] -1;
+  } else {
+    ip++;
+  }
+} // NEEDS TESTING
 
 void jnle() {
-}
+  ip++;
+  if (!(flags & ZERO_FLAG) && ((flags & OVERFLOW_FLAG) >> 4 == (flags & SIGN_FLAG))) {
+    ip += memory[(seg[CS] << 4) + ip] -1;
+  } else {
+    ip++;
+  }
+} // NEEDS TESTING
 
 /*''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''*
  * END OF JUMPS
  *''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''*/
 
+/******************************************************************************
+ * MISC
+ ******************************************************************************/
+
+void seg_override() {}
+void decimal_adjust_for_add() {}
+void decimal_adjust_for_subrtact() {}
+void ascii_adjust_for_add() {}
+void ascii_adjust_for_subtract() {}
+
+/*''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''*
+ * END OF MISC
+ *''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''*/
 
 /******************************************************************************
  * PUSH AND POP
  ******************************************************************************/
-
-void push_seg() {
-  memory[reg.wide[4]] = seg[(c & REG) >> 3];
+void push_rm() {
+  c = memory[(seg[CS] << 4) + ip++];
+  uint8_t mod_index = (c & MOD) >> 6;
+  uint8_t rm_index = c & RM;
+  uint16_t *rm = mod_wide(mod_index, rm_index);
   reg.wide[4]++;
+  memory[reg.wide[4]] = *rm;
   ip++;
 }
+
+void push_reg() {
+  reg.wide[4]++;
+  memory[reg.wide[4]] = reg.wide[c & 0b111];
+  ip++;
+}
+
+void push_seg() {
+  reg.wide[4]++;
+  memory[reg.wide[4]] = seg[(c & REG) >> 3];
+  ip++;
+} // NEEDS TESTING
+
+
+void pop_rm() {
+  c = memory[(seg[CS] << 4) + ip++];
+  uint8_t mod_index = (c & MOD) >> 6;
+  uint8_t rm_index = c & RM;
+  uint16_t *rm = mod_wide(mod_index, rm_index);
+  *rm = memory[reg.wide[4]];
+  reg.wide[4]--;
+  ip++;
+}
+
+void pop_reg() {
+  reg.wide[c & 0b111] = memory[reg.wide[4]];
+  reg.wide[4]--;
+  ip++;
+} // NEEDS TESTING
 
 void pop_seg() {
   seg[(c & REG) >> 3] = memory[reg.wide[4]];
   reg.wide[4]--;
   ip++;
-}
+} // NEEDS TESTING
 
 /*''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''*
  * END OF PUSH AND POP
@@ -646,23 +738,27 @@ void (*jumptable_mod[256])() = {
   byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, byte_acc_im, wide_acc_im, seg_override, ascii_adjust_for_add, 
   byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, byte_acc_im, wide_acc_im, seg_override, ascii_adjust_for_subtract,
 
-  fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
-  fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
-  fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
-  fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
+  fail, fail, fail, fail, fail, fail, fail, fail, 
+  fail, fail, fail, fail, fail, fail, fail, fail, 
+  push_reg, push_reg, push_reg, push_reg, push_reg, push_reg, push_reg, push_reg, 
+  pop_reg, pop_reg, pop_reg, pop_reg, pop_reg, pop_reg, pop_reg, pop_reg, 
+  fail, fail, fail, fail, fail, fail, fail, fail, 
+  fail, fail, fail, fail, fail, fail, fail, fail, 
+  jo, jno, jb, jnb, je, jne, jbe, jnbe, 
+  js, jns, jp, jnp, jl, jge, jle, jnle, 
 
-  byte_rm_im, wide_rm_im, byte_rm_im, wide_rm_im, fail, fail, fail, fail, 
-  byte_reg_rm, wide_reg_rm, byte_reg_rm, wide_reg_rm, wide_seg_rm, fail, wide_seg_rm, fail, 
+  byte_rm_im, wide_rm_im, byte_rm_im, wide_rm_im, fail, fail, fail, pop_rm, 
+  mov_byte_reg_rm, mov_wide_reg_rm, mov_byte_reg_rm, mov_wide_reg_rm, mov_seg_rm, fail, mov_seg_rm, fail, 
   fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
-  fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
+  mov_acc_mem, mov_acc_mem, mov_acc_mem, mov_acc_mem, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
  
-  mov_byte_reg_im, mov_byte_reg_im, mov_byte_reg_im, mov_byte_reg_im, mov_byte_reg_im, mov_byte_reg_im, mov_byte_reg_im, mov_byte_reg_im,
-  mov_wide_reg_im, mov_wide_reg_im, mov_wide_reg_im, mov_wide_reg_im, mov_wide_reg_im, mov_wide_reg_im, mov_wide_reg_im, mov_wide_reg_im,   
+  mov_reg_im, mov_reg_im, mov_reg_im, mov_reg_im, mov_reg_im, mov_reg_im, mov_reg_im, mov_reg_im,
+  mov_reg_im, mov_reg_im, mov_reg_im, mov_reg_im, mov_reg_im, mov_reg_im, mov_reg_im, mov_reg_im,   
 
-  fail, fail, fail, fail, fail, fail, byte_rm_im, wide_rm_im, fail, fail, fail, fail, fail, fail, fail, fail, 
+  fail, fail, fail, fail, fail, fail, mov_byte_rm_im, mov_wide_rm_im, fail, fail, fail, fail, fail, fail, fail, fail, 
   fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
   fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
-  fail, fail, fail, fail, hlt, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, 
+  fail, fail, fail, fail, hlt, fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, push_rm 
 };
  // 176 - 183  or  0b10110xxx
  // 184 - 191  or  0b10111xxx
